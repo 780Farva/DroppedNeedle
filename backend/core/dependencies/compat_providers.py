@@ -99,8 +99,11 @@ def get_stream_concurrency_service() -> "StreamConcurrencyService":
 
     # One worker has limited CPU. Direct reads tolerate the parallel Range requests
     # used by native players; ffmpeg work is deliberately much tighter.
+    # Uses actual CPU affinity, not os.cpu_count(), since the container is pinned to a
+    # subset of the host's cores (see taskset in the supervisor conf) but os.cpu_count()
+    # still reports the host total.
     return StreamConcurrencyService(
-        transcode_global_limit=max(2, (os.cpu_count() or 2) // 2)
+        transcode_global_limit=max(2, len(os.sched_getaffinity(0)) // 2)
     )
 
 

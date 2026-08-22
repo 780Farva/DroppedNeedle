@@ -252,7 +252,23 @@ async def _dispatch(
             services=services,
             transcode_hint=_transcode_hint(settings),
         )
-        return await handler(ctx)
+        # Subsonic traffic otherwise never reaches the background workload gate
+        # (it only wraps /api/* in middleware.py), so warmers/scans have no signal
+        # that a Subsonic client is actively in use and can collide with playback.
+        # Exclude stream/download since those hold the connection for a whole track.
+        workload_gate = None
+        if not is_media_request(request.url.path):
+            from core.dependencies.service_providers import (
+                get_background_workload_gate,
+            )
+
+            workload_gate = get_background_workload_gate()
+            workload_gate.begin_interactive_request()
+        try:
+            return await handler(ctx)
+        finally:
+            if workload_gate is not None:
+                workload_gate.end_interactive_request()
     except Exception as exc:  # noqa: BLE001 - boundary: nothing reaches global handlers
         if not isinstance(exc, DroppedNeedleException):
             logger.exception("Unhandled error in Subsonic endpoint %s", name)

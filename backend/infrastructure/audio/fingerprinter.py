@@ -82,9 +82,11 @@ class AudioFingerprinter:
         self._api_key_provider = api_key_provider
         self._rate_limiter = rate_limiter
         # Gate concurrent fpcalc subprocesses so a scan can't fork-bomb the host; core-scaled
-        # (see _MAX_FPCALC_CONCURRENCY).
+        # (see _MAX_FPCALC_CONCURRENCY). Uses the process's actual CPU affinity, not
+        # os.cpu_count(), since the container reports the host's core count while
+        # only being scheduled onto a pinned subset (see taskset in the supervisor conf).
         self._fpcalc_semaphore = asyncio.Semaphore(
-            min(os.cpu_count() or 2, _MAX_FPCALC_CONCURRENCY)
+            min(len(os.sched_getaffinity(0)), _MAX_FPCALC_CONCURRENCY)
         )
 
     async def fingerprint(self, path: Path) -> FingerprintResult:

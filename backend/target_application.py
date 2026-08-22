@@ -516,6 +516,18 @@ def _server_timezone_name() -> str:
 async def production_target_lifespan(app: FastAPI):
     settings = get_settings()
     logging.getLogger().setLevel(getattr(logging, settings.log_level, logging.INFO))
+
+    # asyncio.to_thread's default executor sizes itself off os.cpu_count(), which
+    # reports the host's total cores even when this process is pinned to a subset
+    # (see taskset in the supervisor conf) - left alone, a burst of concurrent
+    # to_thread work (e.g. cover art thumbnailing) oversubscribes the pinned cores.
+    from concurrent.futures import ThreadPoolExecutor
+
+    affinity_cpus = len(os.sched_getaffinity(0))
+    asyncio.get_running_loop().set_default_executor(
+        ThreadPoolExecutor(max_workers=affinity_cpus + 4)
+    )
+
     from core.config import migrate_legacy_config
     from maintenance.automatic_upgrade import (
         await_target_startup_admission,
