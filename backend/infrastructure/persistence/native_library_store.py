@@ -10,7 +10,7 @@ import os
 import sqlite3
 import unicodedata
 import uuid
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 import threading
@@ -250,6 +250,21 @@ def _complete_track_identity_mapping(
     return [by_local_id[track_id] for track_id in indexed_ids]
 
 
+def _dominant_release_type(concatenated: str | None) -> str | None:
+    """Dominant non-empty stripped release type from an ordered CHAR(31)-joined
+    per-track value list (disc/track order); ties keep the earliest value."""
+    if not concatenated:
+        return None
+    counts: Counter[str] = Counter()
+    for raw in concatenated.split("\x1f"):
+        value = raw.strip()
+        if value:
+            counts[value] += 1
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
 _TARGET_TRACK_SELECT = """
 SELECT
     t.id,
@@ -281,6 +296,7 @@ SELECT
     t.album_sort AS album_sort_name,
     t.album_artist_sort AS album_artist_sort_name,
     t.disc_subtitle,
+    t.release_type,
     t.replaygain_track_gain,
     t.replaygain_album_gain,
     t.replaygain_track_peak,
@@ -1491,6 +1507,7 @@ class NativeLibraryStore(PersistenceBase):
                 "ALTER TABLE library_operation_jobs "
                 "ADD COLUMN reidentification_attempt_count INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE library_identification_jobs ADD COLUMN attention_cause TEXT",
+                "ALTER TABLE local_tracks ADD COLUMN release_type TEXT",
             ):
                 try:
                     connection.execute(statement)
@@ -3049,6 +3066,7 @@ class NativeLibraryStore(PersistenceBase):
                     # than one normalized non-empty format. Lexical MAX is not a rank.
                     f"CASE WHEN COUNT(DISTINCT LOWER(NULLIF(t.file_format, ''))) <= 1 THEN COALESCE(MIN(NULLIF(LOWER(t.file_format), '')), '') ELSE 'mixed' END AS file_format, MAX(t.album_sort) AS album_sort_name, "
                     "GROUP_CONCAT(DISTINCT NULLIF(t.genre, '')) AS genres, "
+                    "(SELECT GROUP_CONCAT(ordered_rt.rt, CHAR(31)) FROM (SELECT q.release_type AS rt FROM local_tracks q WHERE q.local_album_id = a.id AND q.availability = 'indexed' AND q.release_type IS NOT NULL AND TRIM(q.release_type) != '' ORDER BY q.disc_number, q.track_number, q.id) AS ordered_rt) AS release_type_values, "
                     "ae.release_group_mbid AS provider_release_group_mbid, "
                     "ae.release_mbid AS provider_release_mbid, "
                     "custom.manifest_id AS custom_manifest_id, "
@@ -3070,7 +3088,12 @@ class NativeLibraryStore(PersistenceBase):
                     "WHERE " + where + " GROUP BY a.id ORDER BY " + ordering,
                     parameters,
                 ).fetchall()
-                return [dict(row) for row in rows], len(rows)
+                out = []
+                for row in rows:
+                    item = dict(row)
+                    item["release_type"] = _dominant_release_type(item.pop("release_type_values", None))
+                    out.append(item)
+                return out, len(out)
 
             return await self._read(operation)
 
@@ -3134,6 +3157,7 @@ class NativeLibraryStore(PersistenceBase):
                 "MAX(t.imported_at) AS last_imported_at, "
                 "MAX(t.file_format) AS file_format, MAX(t.album_sort) AS album_sort_name, "
                 "GROUP_CONCAT(DISTINCT NULLIF(t.genre, '')) AS genres, "
+                "(SELECT GROUP_CONCAT(ordered_rt.rt, CHAR(31)) FROM (SELECT q.release_type AS rt FROM local_tracks q WHERE q.local_album_id = a.id AND q.availability = 'indexed' AND q.release_type IS NOT NULL AND TRIM(q.release_type) != '' ORDER BY q.disc_number, q.track_number, q.id) AS ordered_rt) AS release_type_values, "
                 "ae.release_group_mbid AS provider_release_group_mbid, "
                 "ae.release_mbid AS provider_release_mbid, "
                 "custom.manifest_id AS custom_manifest_id, "
@@ -3159,7 +3183,12 @@ class NativeLibraryStore(PersistenceBase):
                 "ORDER BY a.title_folded, a.id LIMIT ?",
                 (cutoff_rank, max(1, limit)),
             ).fetchall()
-            return [dict(row) for row in rows]
+            out = []
+            for row in rows:
+                item = dict(row)
+                item["release_type"] = _dominant_release_type(item.pop("release_type_values", None))
+                out.append(item)
+            return out
 
         return await self._read(operation)
 
@@ -3474,6 +3503,7 @@ class NativeLibraryStore(PersistenceBase):
                 # than one normalized non-empty format. Lexical MAX is not a rank.
                 f"CASE WHEN COUNT(DISTINCT LOWER(NULLIF(t.file_format, ''))) <= 1 THEN COALESCE(MIN(NULLIF(LOWER(t.file_format), '')), '') ELSE 'mixed' END AS file_format, MAX(t.album_sort) AS album_sort_name, "
                 "GROUP_CONCAT(DISTINCT NULLIF(t.genre, '')) AS genres, "
+                "(SELECT GROUP_CONCAT(ordered_rt.rt, CHAR(31)) FROM (SELECT q.release_type AS rt FROM local_tracks q WHERE q.local_album_id = a.id AND q.availability = 'indexed' AND q.release_type IS NOT NULL AND TRIM(q.release_type) != '' ORDER BY q.disc_number, q.track_number, q.id) AS ordered_rt) AS release_type_values, "
                 "ae.release_group_mbid AS provider_release_group_mbid, "
                 "ae.release_mbid AS provider_release_mbid, "
                 "aie.provider_artist_id AS provider_artist_mbid, artwork.cover_url, "
@@ -3493,7 +3523,11 @@ class NativeLibraryStore(PersistenceBase):
                 "GROUP BY a.id",
                 album_ids,
             ).fetchall()
-            albums = {str(row["release_group_mbid"]): dict(row) for row in album_rows}
+            albums: dict[str, dict[str, Any]] = {}
+            for _row in album_rows:
+                _item = dict(_row)
+                _item["release_type"] = _dominant_release_type(_item.pop("release_type_values", None))
+                albums[str(_item["release_group_mbid"])] = _item
             track_rows = connection.execute(
                 _TARGET_TRACK_SELECT
                 + f" WHERE t.local_album_id IN ({album_placeholders}) "
@@ -6511,8 +6545,8 @@ class NativeLibraryStore(PersistenceBase):
             "replaygain_album_gain, replaygain_track_peak, replaygain_album_peak, availability, "
             "missing_since, excluded_at, ingest_source, download_task_id, source_path, "
             "imported_at, membership_source, membership_locked, manual_excluded, desired_policy_revision, "
-            "applied_policy_revision, applied_policy, row_revision) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "applied_policy_revision, applied_policy, row_revision, release_type) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 track.id,
                 track.local_album_id,
@@ -6578,6 +6612,7 @@ class NativeLibraryStore(PersistenceBase):
                 track.applied_policy_revision,
                 track.applied_policy,
                 track.row_revision,
+                track.release_type,
             ),
         )
         NativeLibraryStore._replace_track_genres_tx(
@@ -11217,7 +11252,7 @@ class NativeLibraryStore(PersistenceBase):
                 "album_title_folded = ?, album_artist_name = ?, album_artist_name_folded = ?, "
                 "tag_album_title = ?, tag_album_artist_name = ?, "
                 "disc_number = ?, track_number = ?, year = ?, genre = ?, genre_folded = ?, title_sort = ?, "
-                "artist_sort = ?, album_sort = ?, album_artist_sort = ?, disc_subtitle = ?, "
+                "artist_sort = ?, album_sort = ?, album_artist_sort = ?, disc_subtitle = ?, release_type = ?, "
                 "is_compilation = ?, embedded_release_group_mbid = ?, embedded_release_mbid = ?, "
                 "embedded_recording_mbid = ?, embedded_release_track_mbid = ?, "
                 "embedded_artist_mbid = ?, "
@@ -11285,6 +11320,11 @@ class NativeLibraryStore(PersistenceBase):
                         existing["disc_subtitle"]
                         if catalog_locked
                         else track.disc_subtitle
+                    ),
+                    (
+                        existing["release_type"]
+                        if catalog_locked
+                        else track.release_type
                     ),
                     (
                         int(existing["is_compilation"])
@@ -11637,7 +11677,7 @@ class NativeLibraryStore(PersistenceBase):
                     "album_title_folded = ?, album_artist_name = ?, album_artist_name_folded = ?, "
                     "tag_album_title = ?, tag_album_artist_name = ?, "
                     "disc_number = ?, track_number = ?, year = ?, genre = ?, genre_folded = ?, title_sort = ?, "
-                    "artist_sort = ?, album_sort = ?, album_artist_sort = ?, disc_subtitle = ?, "
+                    "artist_sort = ?, album_sort = ?, album_artist_sort = ?, disc_subtitle = ?, release_type = ?, "
                     "is_compilation = ?, embedded_release_group_mbid = ?, embedded_release_mbid = ?, "
                     "embedded_recording_mbid = ?, embedded_release_track_mbid = ?, "
                     "embedded_artist_mbid = ?, "
@@ -11722,6 +11762,11 @@ class NativeLibraryStore(PersistenceBase):
                             existing["disc_subtitle"]
                             if catalog_locked
                             else track.disc_subtitle
+                        ),
+                        (
+                            existing["release_type"]
+                            if catalog_locked
+                            else track.release_type
                         ),
                         (
                             int(existing["is_compilation"])
@@ -26263,7 +26308,7 @@ class NativeLibraryStore(PersistenceBase):
                     "album_artist_name=?, album_artist_name_folded=?, tag_album_title=?, "
                     "tag_album_artist_name=?, disc_number=?, track_number=?, year=?, "
                     "genre=?, genre_folded=?, title_sort=?, artist_sort=?, album_sort=?, "
-                    "album_artist_sort=?, disc_subtitle=?, is_compilation=?, "
+                    "album_artist_sort=?, disc_subtitle=?, release_type=?, is_compilation=?, "
                     "embedded_release_group_mbid=?, embedded_release_mbid=?, "
                     "embedded_recording_mbid=?, embedded_release_track_mbid=?, "
                     "embedded_artist_mbid=?, "
@@ -26303,6 +26348,7 @@ class NativeLibraryStore(PersistenceBase):
                         catalog_tag.album_sort,
                         catalog_tag.album_artist_sort,
                         catalog_tag.disc_subtitle,
+                        catalog_tag.release_type,
                         int(catalog_tag.compilation),
                         tag.musicbrainz_release_group_id,
                         tag.musicbrainz_release_id,

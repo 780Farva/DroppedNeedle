@@ -1618,6 +1618,7 @@ export interface LibraryAlbumSummary {
 	format: string | null;
 	year: number | null;
 	is_compilation: boolean;
+	release_type: string | null;
 	cover_available: boolean;
 	date_added: number | null;
 	sort_name: string | null;
