@@ -195,6 +195,7 @@ export type Track = {
 	length?: number | null;
 	recording_id?: string | null;
 	release_track_id?: string | null;
+	media_format?: string | null;
 };
 
 export type AlbumBasicInfo = {
@@ -2409,6 +2410,7 @@ export interface ScoredCandidate {
 	file_confidence: number;
 	final_score: number;
 	tier: CandidateTier;
+	track_overlap?: number | null;
 	candidate_index?: number | null;
 	quality_evidence?: AudioQualityEvidence | null;
 	quality_decision?: QualityDecision | null;
@@ -2563,6 +2565,9 @@ export interface DownloadTask {
 	attempt_total: number;
 	has_next_source: boolean;
 	held_for_review: boolean;
+	// Wrong-product verdict (Slice 2). Optional for backward-compat with cached responses.
+	wrong_product_verdict_at?: number | null;
+	wrong_product_detail?: string | null;
 }
 
 export interface DownloadListResponse {
