@@ -754,7 +754,12 @@ export const API = {
 		update: (id: string) => `/api/v1/indexers/${id}`,
 		remove: (id: string) => `/api/v1/indexers/${id}`,
 		reorder: () => '/api/v1/indexers/reorder',
-		test: () => '/api/v1/indexers/test'
+		test: () => '/api/v1/indexers/test',
+		searchBackend: () => '/api/v1/indexers/search-backend'
+	},
+	prowlarr: {
+		config: () => '/api/v1/prowlarr/config',
+		test: () => '/api/v1/prowlarr/test'
 	},
 	lidarrImport: {
 		config: () => '/api/v1/lidarr-import/config',

@@ -15,6 +15,8 @@ export const DownloadQueryKeyFactory = {
 	held: (userId?: string, mbid?: string) =>
 		[...DownloadQueryKeyFactory.heldPrefix(userId), mbid ?? 'all'] as const,
 	indexers: () => [...DownloadQueryKeyFactory.all, 'indexers'] as const,
+	searchBackend: () => [...DownloadQueryKeyFactory.indexers(), 'search-backend'] as const,
+	prowlarr: () => [...DownloadQueryKeyFactory.all, 'prowlarr'] as const,
 	sabnzbd: () => [...DownloadQueryKeyFactory.all, 'sabnzbd'] as const,
 	sabnzbdStatus: () => [...DownloadQueryKeyFactory.all, 'sabnzbd-status'] as const,
 	policy: () => [...DownloadQueryKeyFactory.all, 'policy'] as const,
