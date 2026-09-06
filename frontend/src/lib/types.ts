@@ -1130,6 +1130,7 @@ export type LocalAlbumMatch = {
 	tracks: LocalTrackInfo[];
 	total_size_bytes: number;
 	primary_format?: string | null;
+	download_allowed?: boolean;
 };
 
 export type LocalAlbumSummary = {
@@ -1143,6 +1144,11 @@ export type LocalAlbumSummary = {
 	primary_format?: string | null;
 	cover_url?: string | null;
 	date_added?: string | null;
+	download_allowed?: boolean;
+};
+
+export type DownloadAccessResponse = {
+	allowed: boolean;
 };
 
 export type CrateReason = 'recent' | 'rediscover' | 'surprise' | 'same_era';
@@ -1641,6 +1647,7 @@ export interface LibraryAlbumSummary {
 export interface LibraryAlbumDetail extends LibraryAlbumSummary {
 	row_revision: number;
 	input_revision: string;
+	download_allowed?: boolean;
 	identification_status:
 		| 'identified'
 		| 'needs_review'
