@@ -1,6 +1,25 @@
 import { getApiUrl } from '$lib/api/api-utils';
 import { API } from '$lib/constants';
 import type { DownloadProgress, DownloadSourceUpdate } from '$lib/types';
+import { invalidateQueriesWithPersister } from '$lib/queries/QueryClient';
+import { DownloadQueryKeyFactory } from './DownloadQueryKeyFactory';
+import { getDownloadScope } from './downloadScope.svelte';
+
+let structuralRefreshGeneration: number | null = null;
+
+function refreshObservedActivity() {
+	const scope = getDownloadScope();
+	if (structuralRefreshGeneration === scope.generation) return;
+	structuralRefreshGeneration = scope.generation;
+	setTimeout(() => {
+		if (structuralRefreshGeneration === scope.generation) structuralRefreshGeneration = null;
+		if (!scope.userId || scope !== getDownloadScope()) return;
+		void invalidateQueriesWithPersister({
+			queryKey: DownloadQueryKeyFactory.activity(scope.userId),
+			exact: true
+		}).catch(() => undefined);
+	}, 100);
+}
 
 interface DownloadStreamState {
 	progress: DownloadProgress | null;
@@ -94,6 +113,7 @@ export function createDownloadStream() {
 		done: false
 	});
 	let source: EventSource | null = null;
+	let streamScope = getDownloadScope();
 
 	function stop() {
 		if (source) {
@@ -105,10 +125,21 @@ export function createDownloadStream() {
 	function start(taskId: string) {
 		stop();
 		state = { progress: null, status: null, source: null, done: false };
+		const scope = getDownloadScope();
+		streamScope = scope;
 		source = new EventSource(getApiUrl(API.downloads.stream(taskId)));
 		source.addEventListener('status', (e) => {
+			if (scope !== getDownloadScope()) return;
 			const d = parse(e);
 			const sourceUpdate = parseSourceUpdate(d, state.source);
+			if (
+				state.status !== d.status ||
+				state.source?.candidate_index !== sourceUpdate.candidate_index ||
+				state.source?.attempt_number !== sourceUpdate.attempt_number ||
+				state.source?.attempt_total !== sourceUpdate.attempt_total
+			) {
+				refreshObservedActivity();
+			}
 			state = {
 				...state,
 				status: (d.status as string) ?? state.status,
@@ -116,6 +147,7 @@ export function createDownloadStream() {
 			};
 		});
 		source.addEventListener('progress', (e) => {
+			if (scope !== getDownloadScope()) return;
 			const d = parse(e);
 			const sourceUpdate = parseSourceUpdate(d, state.source);
 			state = {
@@ -132,6 +164,8 @@ export function createDownloadStream() {
 			};
 		});
 		source.addEventListener('complete', (e) => {
+			if (scope !== getDownloadScope()) return;
+			refreshObservedActivity();
 			const d = parse(e);
 			state = { ...state, status: (d.status as string) ?? state.status, done: true };
 			stop();
@@ -140,7 +174,9 @@ export function createDownloadStream() {
 
 	return {
 		get state() {
-			return state;
+			return streamScope === getDownloadScope()
+				? state
+				: { progress: null, status: null, source: null, done: false };
 		},
 		start,
 		stop
