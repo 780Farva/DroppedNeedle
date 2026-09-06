@@ -396,7 +396,7 @@ class DropImportService:
     async def _run_job(self, job_id: str) -> None:
         try:
             await self._process_job(job_id)
-        except Exception:
+        except Exception:  # noqa: BLE001 - job boundary records FAILED instead of raising
             logger.exception("Drop import job %s failed", job_id)
             try:
                 await self._store.set_job_status(
@@ -438,7 +438,7 @@ class DropImportService:
         for item_id, _folder_name, paths in item_ids:
             try:
                 await self._process_item(job, item_id, paths)
-            except Exception:
+            except Exception:  # noqa: BLE001 - failing folder must not abort sibling folders
                 logger.exception("Drop import item %s failed", item_id)
                 await self._store.update_item(
                     item_id,
