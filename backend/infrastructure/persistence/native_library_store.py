@@ -385,6 +385,13 @@ _LEGACY_MIGRATION_TABLE_ORDER = {
     "compat_id_map": "kind, internal_id",
 }
 
+# Tables skipped by get_bounded_legacy_source_revision. The bounded migrator
+# never reads these, but live app activity mutates them mid-run (notably
+# auth_users.last_login_at flips on every login), which aborted every startup
+# pending run with StaleRevisionError and retried it forever. The revision
+# guard must hash only migration input.
+_BOUNDED_LEGACY_REVISION_EXCLUDED = frozenset({"auth_users"})
+
 _LEGACY_REFERENCE_TABLES = frozenset(
     {
         "manual_review_queue",
@@ -5675,7 +5682,11 @@ class NativeLibraryStore(PersistenceBase):
         return await self._read(operation)
 
     async def get_bounded_legacy_source_revision(self) -> str:
-        """Hash ordered legacy rows without materializing the database in memory."""
+        """Hash ordered legacy rows without materializing the database in memory.
+
+        Tables in ``_BOUNDED_LEGACY_REVISION_EXCLUDED`` are skipped: they are
+        not migration input, so live writes to them must not stale a run.
+        """
 
         def operation(connection: sqlite3.Connection) -> str:
             present = {
@@ -5686,6 +5697,8 @@ class NativeLibraryStore(PersistenceBase):
             }
             digest = hashlib.sha256(b"bounded-legacy-catalog-v1\0")
             for table, ordering in _LEGACY_MIGRATION_TABLE_ORDER.items():
+                if table in _BOUNDED_LEGACY_REVISION_EXCLUDED:
+                    continue
                 digest.update(table.encode())
                 digest.update(b"\0")
                 if table not in present:
