@@ -1189,6 +1189,25 @@ def get_plugin_host() -> "PluginHost":
         preferences_service=get_preferences_service(),
     )
 
+@singleton
+def get_plugin_source_registry() -> "PluginSourceRegistry":
+    from services.plugin_sources import PluginSourceRegistry
+
+    try:
+        host = get_plugin_host()
+    except Exception:  # noqa: BLE001 - absence reads as no plugins
+        host = None
+    return PluginSourceRegistry(host)
+
+
+@singleton
+def get_plugin_release_scorer() -> "PluginReleaseScorer":
+    from services.native.plugin_release_scorer import PluginReleaseScorer  # type: ignore
+
+    from .repo_providers import get_download_store
+
+    return PluginReleaseScorer(get_download_store())
+
 
 def _build_free_music_service(drop_import, file_processor) -> "FreeMusicService":
     from services.native.free_music_service import FreeMusicService
@@ -1314,6 +1333,7 @@ def _build_drop_import_service(
         staging_root=get_settings().root_app_dir / "imports",
         publish_import_bundle=publish_import_bundle,
         policy_revision_getter=policy_revision_getter,
+        plugin_host=get_plugin_host(),
     )
 
 
@@ -1516,6 +1536,7 @@ def _build_wanted_watcher_service(
         sse_publisher=get_sse_publisher(),
         preferences=get_preferences_service(),
         provider_available=get_mb_provider_availability(),
+        plugin_host=get_plugin_host(),
     )
 
 
@@ -1736,6 +1757,7 @@ def _build_request_service(
         ownership_service=ownership_service,
         album_service=album_service,
         mbid_store=get_mbid_store(),
+        plugin_host=get_plugin_host(),
     )
 
 
@@ -1872,6 +1894,7 @@ def _build_requests_page_service(
         get_download_service=download_service_getter,
         download_store=get_download_store(),
         acquisition=acquisition,
+        plugin_host=get_plugin_host(),
     )
 
 
@@ -2242,7 +2265,9 @@ def get_search_enrichment_service() -> "SearchEnrichmentService":
     lb_repo = get_listenbrainz_repository()
     preferences_service = get_preferences_service()
     lastfm_repo = get_lastfm_repository()
-    return SearchEnrichmentService(lb_repo, preferences_service, lastfm_repo)
+    return SearchEnrichmentService(
+        lb_repo, preferences_service, lastfm_repo, plugin_host=get_plugin_host()
+    )
 
 
 @singleton
@@ -2692,10 +2717,20 @@ def get_acquisition_cleanup_service() -> "AcquisitionCleanupService":
     from .cache_providers import get_native_library_store
     from .repo_providers import get_download_client_for_source, get_download_store
 
+    def _client_for_source(source: str):
+        if source and source.startswith("plugin:"):
+            try:
+                client = get_plugin_source_registry().client_for(source)
+            except Exception:  # noqa: BLE001 - fallback to bundled resolver
+                client = None
+            if client is not None:
+                return client
+        return get_download_client_for_source(source)
+
     return AcquisitionCleanupService(
         get_download_store(),
         get_native_library_store(),
-        get_download_client_for_source,
+        _client_for_source,
         lambda: Path(
             get_preferences_service().get_sabnzbd_connection_raw().downloads_mount
         ),
@@ -2721,7 +2756,6 @@ def _build_download_orchestrator(
         get_slskd_indexer,
         get_wanted_store,
     )
-
     prefs = get_preferences_service()
     lib = prefs.get_typed_library_settings_raw()
     policy = prefs.get_download_policy()
@@ -2735,6 +2769,18 @@ def _build_download_orchestrator(
         if lib.staging_path
         else Path(get_settings().cache_dir) / "download-staging"
     )
+    registry = get_plugin_source_registry()
+    try:
+        from services.native.acquisition.composite_indexer import CompositeIndexer
+
+        base_indexer = get_newznab_indexer()
+        try:
+            plugin_usenet = registry.indexers_for_target("usenet")
+        except Exception:  # noqa: BLE001 - absence reads as no pooled indexers
+            plugin_usenet = []
+        usenet_indexer = CompositeIndexer(base_indexer, plugin_usenet)
+    except Exception:  # noqa: BLE001 - composite never blocks bundled sources
+        usenet_indexer = get_newznab_indexer()
     return DownloadOrchestrator(
         spec_policy_extras=lambda: _build_spec_policy(
             get_preferences_service().get_download_policy()
@@ -2763,7 +2809,7 @@ def _build_download_orchestrator(
         auto_retry_base_interval_minutes=policy.auto_retry_base_interval_minutes,
         request_history=get_request_history_store(),
         on_import_callback=on_import_callback,
-        usenet_indexer=get_newznab_indexer(),
+        usenet_indexer=usenet_indexer,
         usenet_client=get_sabnzbd_download_client(),
         usenet_scorer=get_newznab_release_scorer(),
         usenet_enabled=usenet_enabled,
@@ -2779,6 +2825,8 @@ def _build_download_orchestrator(
         get_download_policy=lambda: get_preferences_service().get_download_policy(),
         wanted_store=get_wanted_store(),
         cleanup_service=get_acquisition_cleanup_service(),
+        plugin_sources=registry,
+        plugin_host=get_plugin_host(),
     )
 
 
@@ -2824,8 +2872,27 @@ def _build_download_service(
     dc = prefs.get_download_client_settings_raw()
     policy = prefs.get_download_policy()
     usenet_enabled = prefs.is_usenet_ready()
-    # The service is "enabled" if ANY source can act (slskd OR usenet), so a Usenet-only
-    # install isn't blocked by the slskd-disabled guard.
+    registry = get_plugin_source_registry()
+    try:
+        from services.native.acquisition.composite_indexer import CompositeIndexer
+
+        base_indexer = get_newznab_indexer()
+        try:
+            plugin_usenet = registry.indexers_for_target("usenet")
+        except Exception:  # noqa: BLE001 - absence reads as no pooled indexers
+            plugin_usenet = []
+        usenet_indexer = CompositeIndexer(base_indexer, plugin_usenet)
+    except Exception:  # noqa: BLE001 - composite never blocks bundled sources
+        usenet_indexer = get_newznab_indexer()
+    try:
+        plugin_scorer = get_plugin_release_scorer()
+    except Exception:  # noqa: BLE001 - absence reads as no plugin scorer
+        plugin_scorer = None
+    try:
+        plugin_ready = bool(registry.is_any_source_ready())
+    except Exception:  # noqa: BLE001 - absence reads as not ready
+        plugin_ready = False
+    # The service is "enabled" if ANY source can act (slskd OR usenet OR plugins).
     return DownloadService(
         snapshot_factory=_acquisition_snapshot_factory(),
         download_client=get_download_client_repository(),
@@ -2842,8 +2909,8 @@ def _build_download_service(
         track_matcher=get_track_matcher(),
         auto_accept_threshold=policy.preflight_score_auto_accept,
         manual_threshold=policy.preflight_score_manual_min,
-        enabled=dc.enabled or usenet_enabled,
-        usenet_indexer=get_newznab_indexer(),
+        enabled=dc.enabled or usenet_enabled or plugin_ready,
+        usenet_indexer=usenet_indexer,
         usenet_scorer=get_newznab_release_scorer(),
         usenet_enabled=usenet_enabled,
         soulseek_enabled=dc.enabled,
@@ -2853,6 +2920,8 @@ def _build_download_service(
         release_pin_store=release_pin_store or get_album_release_pin_store(),
         ownership_service=ownership_service,
         library_reconciler=library_reconciler,
+        plugin_sources=registry,
+        plugin_scorer=plugin_scorer,
     )
 
 
