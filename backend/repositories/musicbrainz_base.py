@@ -73,6 +73,7 @@ from infrastructure.observability.provider_counters import (
 from infrastructure.http.brainzmash_transport import (
     BRAINZMASH_ENDPOINT,
     validate_brainzmash_path,
+    validate_brainzmash_request_url,
     validate_brainzmash_url,
 )
 from repositories.edition_policy import recall_key
@@ -898,7 +899,28 @@ async def _mb_api_get_attempt(
             client = (
                 get_mb_brainzmash_http_client() if brainzmash else get_mb_http_client()
             )
-            return await client.get(url, params=request_params)
+            response = await client.get(url, params=request_params)
+            # MusicBrainz answers a lookup of a *merged* entity with a 3xx to the
+            # surviving MBID. The BrainzMash client sets follow_redirects=False, so
+            # without this the merge surfaces as a hard failure below and the album
+            # never identifies (upstream issue #422). Follow at most one hop, and
+            # only once the Location has passed exactly the same authority/path
+            # validation the initial URL did: a cross-origin, port-shifted,
+            # scheme-downgraded or off-/ws/2 target still falls through to the
+            # existing rejection untouched.
+            if brainzmash and 300 <= response.status_code < 400:
+                location = response.headers.get("location", "")
+                try:
+                    validate_brainzmash_request_url(location)
+                    hop_path = validate_brainzmash_path(
+                        urlsplit(location).path[len("/ws/2") :]
+                    )
+                except ValueError:
+                    return response
+                response = await client.get(
+                    f"{BRAINZMASH_ENDPOINT}{hop_path}", params=request_params
+                )
+            return response
 
         try:
             if brainzmash:
