@@ -1047,6 +1047,22 @@ class EditionConversionService:
             created_at=now,
             updated_at=now,
         )
+        # The plan item must pin the SAME revision values the preview freshness
+        # check reads back from local_tracks (see
+        # LibraryManagementPreviewService._subject_moved). Collect them here;
+        # _preview_plan_item runs in a worker thread and cannot query the store.
+        live_revisions: dict[str, tuple[str, str]] = {}
+        for request in prepared.files:
+            track_id = request.replacement_local_track_id
+            if not track_id or track_id in live_revisions:
+                continue
+            row = await self._store.get_target_track(track_id)
+            if row is None:
+                continue
+            live_revisions[track_id] = (
+                str(row["stat_revision"]),
+                str(row["tag_revision"]),
+            )
         plan_items = list(
             await asyncio.gather(
                 *(
@@ -1059,6 +1075,7 @@ class EditionConversionService:
                         policy_revision=policy.policy_revision,
                         profile_revision=pinned.profile.revision,
                         created_at=now,
+                        live_revisions=live_revisions,
                     )
                     for request in prepared.files
                 )
@@ -1109,6 +1126,7 @@ class EditionConversionService:
         policy_revision: str,
         profile_revision: str,
         created_at: float,
+        live_revisions: dict[str, tuple[str, str]] | None = None,
     ) -> LibraryManagementPlanItem:
         desired_json = msgspec.json.encode(request.desired_document).decode()
         source_root_id = request.replacement_root_id or request.destination_root_id
@@ -1151,6 +1169,19 @@ class EditionConversionService:
             for artifact in request.artifacts
         ]
         fingerprint = _sha256_file(Path(request.input_path))
+        # `local_tracks.stat_revision` is a "<size>:<mtime_ns>" composite and
+        # `tag_revision` is a separate digest. Writing this file fingerprint into
+        # both made _subject_moved() compare a sha256 against "<size>:<mtime_ns>",
+        # which can never be equal - so every edition-conversion preview was born
+        # stale with FILE_CHANGED and could never be applied. Pin the live values,
+        # exactly as library_management_planner/duplicate/baseline/undo all do.
+        # Fall back to the fingerprint only when there is no local track row yet
+        # (an acquired replacement), preserving the previous behaviour there.
+        pinned_revisions = (live_revisions or {}).get(
+            request.replacement_local_track_id or ""
+        )
+        stat_revision = pinned_revisions[0] if pinned_revisions else fingerprint
+        tag_revision = pinned_revisions[1] if pinned_revisions else fingerprint
         return LibraryManagementPlanItem(
             job_id=preview_job_id,
             ordinal=request.ordinal,
@@ -1162,8 +1193,8 @@ class EditionConversionService:
             expected_profile_revision=profile_revision,
             expected_root_id=source_root_id,
             expected_relative_path=source_relative,
-            expected_stat_revision=fingerprint,
-            expected_tag_revision=fingerprint,
+            expected_stat_revision=stat_revision,
+            expected_tag_revision=tag_revision,
             expected_file_fingerprint=fingerprint,
             source_path_identity=hashlib.sha256(
                 f"{source_root_id}\x00{source_relative}".encode()
