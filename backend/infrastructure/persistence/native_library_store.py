@@ -24832,8 +24832,16 @@ class NativeLibraryStore(PersistenceBase):
                         or str(current["stat_revision"])
                         != str(expected["expected_stat_revision"])
                         or (
+                            # The row can exist with a NULL revision when the
+                            # album has no committed identity yet - which is the
+                            # normal case for the conversion that is about to
+                            # give it one. Guard the VALUE, not just the row, to
+                            # mirror how expected_identity_revision is written in
+                            # edition_conversion_service._local_file; without this
+                            # int(None) raises TypeError and Apply 500s.
                             int(identity_row["identity_row_revision"])
                             if identity_row is not None
+                            and identity_row["identity_row_revision"] is not None
                             else None
                         )
                         != expected["expected_identity_revision"]
